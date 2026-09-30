@@ -6,45 +6,56 @@ from fastapi import UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from openai import OpenAI
-import sqlite3
+import psycopg2
 import datetime
 import secrets
 import os
 import json
 
-# ===== 数据库：记录每次调用 =====
-conn = sqlite3.connect("records.db", check_same_thread=False)
+# ===== 数据库：PostgreSQL 专业版（AI的记忆仓库） =====
+class 数据库:
+    """小包装：让PostgreSQL用起来和之前sqlite一样顺手"""
+    def __init__(self):
+        self.conn = psycopg2.connect(
+            host="localhost",
+            dbname="ai_toolbox",
+            user="aibox",
+            password="在这里填数据库密码",
+            connect_timeout=5,
+        )
+        self.conn.autocommit = True    # 每条SQL立即生效，不用手动commit
+    def execute(self, sql, 参数=None):
+        cur = self.conn.cursor()
+        cur.execute(sql, 参数 or ())
+        return cur
+    def commit(self):
+        pass    # autocommit已开启
+
+conn = 数据库()
+
+# 建表（PostgreSQL语法：SERIAL自动编号）
 conn.execute("""CREATE TABLE IF NOT EXISTS 记录 (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     时间 TEXT,
     客户 TEXT,
     接口 TEXT,
     内容 TEXT,
     回答 TEXT
 )""")
-# 老数据库没有"客户"列时，补上
-try:
-    conn.execute("ALTER TABLE 记录 ADD COLUMN 客户 TEXT")
-    conn.commit()
-except:
-    pass
-
 # 客户表：存每个客户的密钥和用量
 conn.execute("""CREATE TABLE IF NOT EXISTS 客户 (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     key TEXT UNIQUE,
     客户名 TEXT,
     次数 INTEGER DEFAULT 0
 )""")
-conn.commit()
 
 def 保存记录(客户, 接口, 内容, 回答):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn.execute(
-        "INSERT INTO 记录 (时间, 客户, 接口, 内容, 回答) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO 记录 (时间, 客户, 接口, 内容, 回答) VALUES (%s, %s, %s, %s, %s)",
         (now, 客户, 接口, 内容, 回答[:200])  # 回答只存前200字，够看就行
     )
-    conn.commit()
 
 # ===== 客户密钥功能 =====
 def 生成key():
@@ -54,11 +65,11 @@ def 验证密钥(请求头):
     """请求头里带了X-Key就返回(客户名, 次数)，没带/无效返回(None, None)"""
     if not 请求头:  # 没带密钥
         return None, None
-    row = conn.execute("SELECT 客户名, 次数 FROM 客户 WHERE key=?", (请求头,)).fetchone()
+    row = conn.execute("SELECT 客户名, 次数 FROM 客户 WHERE key=%s", (请求头,)).fetchone()
     if not row:  # 密钥不存在
         return None, None
     新次数 = row[1] + 1
-    conn.execute("UPDATE 客户 SET 次数=? WHERE key=?", (新次数, 请求头))
+    conn.execute("UPDATE 客户 SET 次数=%s WHERE key=%s", (新次数, 请求头))
     conn.commit()
     return row[0], 新次数
 
@@ -79,7 +90,7 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # 配置AI
 client = OpenAI(
-    api_key="sk-在这里填你的API密钥",  # 部署前填真实密钥
+    api_key="sk-在这里填你的API密钥",
     base_url="https://api.deepseek.com"
 )
 
@@ -419,7 +430,7 @@ class 开通请求(BaseModel):
 @app.post("/开通")
 def 开通(开通请求: 开通请求):
     key = 生成key()
-    conn.execute("INSERT INTO 客户 (key, 客户名, 次数) VALUES (?, ?, 0)", (key, 开通请求.客户名))
+    conn.execute("INSERT INTO 客户 (key, 客户名, 次数) VALUES (%s, %s, 0)", (key, 开通请求.客户名))
     conn.commit()
     return {"客户名": 开通请求.客户名, "key": key, "提示": "把key发给客户，客户在工具箱里填上就能用"}
 
