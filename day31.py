@@ -50,6 +50,27 @@ conn.execute("""CREATE TABLE IF NOT EXISTS 客户 (
     次数 INTEGER DEFAULT 0
 )""")
 
+# ===== RAG知识库表：AI客服"看着资料回答" =====
+conn.execute("""CREATE TABLE IF NOT EXISTS 知识库 (
+    id SERIAL PRIMARY KEY,
+    内容 TEXT
+)""")
+# 表空时写入默认店铺资料（以后想加资料：INSERT进这张表即可，不用改代码）
+cur = conn.execute("SELECT count(*) FROM 知识库")
+if cur.fetchone()[0] == 0:
+    默认资料 = [
+        "金枕榴莲75元/斤，猫山王150元/斤",
+        "坏果包赔：收货后24小时内拍照联系客服，坏多少赔多少",
+        "开果不满意：包退，运费我们承担",
+        "发货：下单后48小时内发出，全国包邮",
+        "榴莲纯肉分装规格：1斤装/1.5斤装/2斤装/2.5斤装/3斤装",
+        "客服工作时间：早9点到晚10点",
+        "A果按40%出肉率算纯肉，B果按30%出肉率算纯肉",
+        "榴莲纯肉定价：想卖的价格加上抖音每单5%提点就是最终售价",
+    ]
+    for 条 in 默认资料:
+        conn.execute("INSERT INTO 知识库 (内容) VALUES (%s)", (条,))
+
 def 保存记录(客户, 接口, 内容, 回答):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn.execute(
@@ -187,6 +208,28 @@ def 流式AI(messages):
         return
     yield "抱歉，我有点绕晕了，麻烦您再说一次？"
 
+# ---------- RAG：AI客服"看着资料回答" ----------
+# 原理：客户问什么 → 从知识库表里找出"意思最像"的几条 → 拼给AI当参考资料
+from collections import Counter
+
+def 特征(句子):
+    """把一句话变成：每个字出现几次（简化版向量）"""
+    return Counter(c for c in 句子 if c not in "，。？！：、 ")
+
+def 相似度(句子A, 句子B):
+    """余弦相似度：0~1，越接近1越像"""
+    a, b = 特征(句子A), 特征(句子B)
+    共同 = sum(a[c] * b[c] for c in a if c in b)
+    长度 = (sum(a.values()) ** 0.5) * (sum(b.values()) ** 0.5)
+    return 共同 / 长度 if 长度 else 0
+
+def 搜索知识库(问题):
+    """客户提问 → 数据库里所有资料打分 → 取最像的3条"""
+    cur = conn.execute("SELECT 内容 FROM 知识库")
+    条目 = [r[0] for r in cur.fetchall()]
+    打分 = sorted(((相似度(问题, 条), 条) for 条 in 条目), reverse=True)
+    return "\n".join(t for _, t in 打分[:3])
+
 # ---------- 1. AI客服（售后谈判专家，打字机流式版） ----------
 @app.post("/客服")
 def 客服(请求: 请求, 请求头: str = Header(None, alias="X-Key")):
@@ -220,8 +263,10 @@ def 客服(请求: 请求, 请求头: str = Header(None, alias="X-Key")):
 3. 正常咨询（价格/发货/规格）直接给数字，别绕弯。
 4. 拿不准的就说"我帮您问问老板"，绝不编造。
 """
+    # RAG：按客户问题，从知识库表里搜出最相关的资料，拼进提示词
+    rag资料 = 搜索知识库(请求.内容)
     messages = [
-        {"role": "system", "content": 知识库},
+        {"role": "system", "content": 知识库 + "\n\n【店铺资料（查到的，回答以这里为准）】\n" + rag资料},
         {"role": "user", "content": 请求.内容}
     ]
     def 生成():
