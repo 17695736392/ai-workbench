@@ -1,0 +1,5 @@
+print("hello")
+print("我是夏天,今天是转行AI的第1天")
+print("从今天开始,每天进步一点点")
+print("我叫夏天")
+print("我要把AI学明白")
